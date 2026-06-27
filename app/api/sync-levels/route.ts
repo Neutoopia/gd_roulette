@@ -18,11 +18,18 @@ import { eq } from "drizzle-orm";
  *
  * On Vercel, add a vercel.json cron entry that calls this daily.
  */
-export async function POST(req: Request) {
-  const auth = req.headers.get("authorization");
+export async function GET(req: Request) {
+   const authHeader = req.headers.get("authorization");
   const secret = process.env.SYNC_SECRET;
+  const cronSecret = process.env.CRON_SECRET; // automatically provided by Vercel
+
   if (!secret) return NextResponse.json({ error: "SYNC_SECRET not configured" }, { status: 500 });
-  if (auth !== `Bearer ${secret}`) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const isVercelCron = cronSecret && authHeader === `Bearer ${cronSecret}`;
+  const isManual     = authHeader === `Bearer ${secret}`;
+
+  if (!isVercelCron && !isManual)
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const pool = await fetchLevelPool();
   if (pool.length === 0)
