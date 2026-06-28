@@ -3,37 +3,42 @@ import { desc, eq } from "drizzle-orm";
 import { auth } from "@/lib/auth";
 import { db } from "@/db/client";
 import { attempts } from "@/db/schema";
+import { dbError } from "@/lib/api-error";
 
-/**
- * GET /api/export
- * Returns the user's full attempt history as a downloadable JSON file.
- */
 export async function GET() {
+  // 1. Auth
   const session = await auth();
   if (!session?.user?.id)
-    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    return NextResponse.json({ error: "Not authenticated." }, { status: 401 });
 
-  const rows = await db.query.attempts.findMany({
-    where: eq(attempts.userId, session.user.id),
-    with: { level: true },
-    orderBy: [desc(attempts.spunAt)],
-  });
+  // 2. Fetch all attempts with their levels
+  let rows;
+  try {
+    rows = await db.query.attempts.findMany({
+      where: eq(attempts.userId, session.user.id),
+      with: { level: true },
+      orderBy: [desc(attempts.spunAt)],
+    });
+  } catch (err) {
+    return dbError("export/fetch", err);
+  }
 
+  // 3. Build the export payload
   const exportData = {
-    exportedAt: new Date().toISOString(),
-    user: { email: session.user.email, name: session.user.name },
+    exportedAt:    new Date().toISOString(),
+    user:          { email: session.user.email, name: session.user.name ?? null },
     totalAttempts: rows.length,
     attempts: rows.map((a) => ({
-      id:             a.id,
-      status:         a.status,
-      spunAt:         a.spunAt,
-      resolvedAt:     a.resolvedAt,
-      progressNote:   a.progressNote,
-      bestPercent:    a.bestPercent,
-      attemptCount:   a.attemptCount,
-      timeSpentMin:   a.timeSpentMin,
-      requestedDiff:  a.requestedDiff,
-      requestedTier:  a.requestedTier,
+      id:            a.id,
+      status:        a.status,
+      spunAt:        a.spunAt,
+      resolvedAt:    a.resolvedAt,
+      progressNote:  a.progressNote,
+      bestPercent:   a.bestPercent,
+      attemptCount:  a.attemptCount,
+      timeSpentMin:  a.timeSpentMin,
+      requestedDiff: a.requestedDiff,
+      requestedTier: a.requestedTier,
       level: {
         gdId:       a.level.gdId,
         name:       a.level.name,
@@ -50,11 +55,24 @@ export async function GET() {
     })),
   };
 
-  return new NextResponse(JSON.stringify(exportData, null, 2), {
+  // 4. Serialize and return as a file download
+  let json: string;
+  try {
+    json = JSON.stringify(exportData, null, 2);
+  } catch (err) {
+    console.error("[export/serialize]", err);
+    return NextResponse.json(
+      { error: "Failed to serialize export data." },
+      { status: 500 }
+    );
+  }
+
+  const filename = `gd-roulette-${new Date().toISOString().slice(0, 10)}.json`;
+  return new NextResponse(json, {
     status: 200,
     headers: {
       "Content-Type":        "application/json",
-      "Content-Disposition": `attachment; filename="gd-roulette-records-${new Date().toISOString().slice(0, 10)}.json"`,
+      "Content-Disposition": `attachment; filename="${filename}"`,
     },
   });
 }
