@@ -1,83 +1,80 @@
 /**
- * GD Level Data Sources
+ * GD Level Data Source — GDBrowser API
  *
- * Demon levels    → Pointercrate API (https://pointercrate.com/api/v2/demons/)
- *                   Public, stable, explicitly meant to be used. No auth needed.
- *                   Covers Easy/Medium/Hard/Insane/Extreme Demon with real player names.
+ * GDBrowser (gdbrowser.com) proxies the official GD servers and exposes
+ * a clean JSON API. We call it ONLY from the sync job (/api/sync-levels),
+ * never on live user requests. All data is stored in our own DB so the
+ * app keeps working even if GDBrowser is temporarily down.
  *
- * Non-demon levels → Static seed (hardcoded below)
- *                    ~120 real, well-known GD levels across Easy/Normal/Hard/Harder/Insane.
- *                    No API, no boomlings dependency, works on any host forever.
- *
- * Both feed into fetchLevelPool(), called only by the sync job (/api/sync-levels).
- * Nothing here is ever called on a live user request.
+ * We send a realistic User-Agent to avoid being blocked by Vercel's
+ * datacenter IPs, and add polite delays between requests.
  */
 
-const FETCH_TIMEOUT = 12_000;
+const BASE        = "https://gdbrowser.com/api";
+const TIMEOUT_MS  = 12_000;
+const DELAY_MS    = 500; // between each search call
+
+const USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+  "AppleWebKit/537.36 (KHTML, like Gecko) " +
+  "Chrome/124.0.0.0 Safari/537.36";
 
 export interface GdLevel {
-  gdId:       number;
-  name:       string;
-  author:     string;
-  difficulty: string;
-  isDemon:    boolean;
-  stars:      number;
-  ratingTier: "none" | "rated" | "featured" | "epic" | "legendary" | "mythic";
-  downloads:  number;
-  likes:      number;
-  length:     string;
-  objects:    number;
-  songName:   string;
-  songAuthor: string;
+  gdId:        number;
+  name:        string;
+  author:      string;
+  difficulty:  string;
+  isDemon:     boolean;
+  stars:       number;
+  ratingTier:  "none" | "rated" | "featured" | "epic" | "legendary" | "mythic";
+  downloads:   number;
+  likes:       number;
+  length:      string;
+  objects:     number;
+  songName:    string;
+  songAuthor:  string;
   description: string;
   gameVersion: string;
 }
 
-// ---------------------------------------------------------------------------
-// Pointercrate demon levels
-// ---------------------------------------------------------------------------
+// ── GDBrowser response shape ───────────────────────────────────────────────
 
-interface PointercrateDemon {
-  id:       number;
-  name:     string;
-  position: number;
-  publisher: { id: number; name: string; banned: boolean };
-  verifier:  { id: number; name: string; banned: boolean };
-  level_id:  number | null;
-  video:     string | null;
-  requirement: number;
+interface GdbLevel {
+  id:          number | string;
+  name:        string;
+  author:      string;
+  difficulty:  string;  // e.g. "Easy", "Hard Demon"
+  stars:       number;
+  featured:    number;  // 0 or 1
+  epic:        number;  // 0 or 1
+  cp?:         number;  // creator points: 1=rated,2=featured,3=epic,4=legendary,5=mythic
+  downloads:   number;
+  likes:       number;
+  length:      string;  // "Tiny"|"Short"|"Medium"|"Long"|"XL"|"Platformer"
+  objects?:    number;
+  songName?:   string;
+  songAuthor?: string;
+  description?: string;
+  version?:    number;
+  disliked?:   boolean;
 }
 
-/**
- * Map a demon's position on the Pointercrate list to a GD demon difficulty.
- *
- * Pointercrate splits the list into:
- *   Main list   positions 1–150    (the hardest demons)
- *   Extended    positions 151–250  (still very hard)
- *   Legacy      positions 251+     (older/easier demons)
- *
- * We map these to GD's demon sub-difficulties roughly:
- *   1–50   → Extreme Demon  (top tier)
- *   51–150 → Insane Demon
- *   151–250→ Hard Demon
- *   251–500→ Medium Demon
- *   500+   → Easy Demon
- */
-function demonDifficultyFromPosition(position: number): string {
-  if (position <= 50)  return "Extreme Demon";
-  if (position <= 150) return "Insane Demon";
-  if (position <= 250) return "Hard Demon";
-  if (position <= 500) return "Medium Demon";
-  return "Easy Demon";
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 async function fetchWithTimeout(url: string): Promise<Response | null> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
     const res = await fetch(url, {
       signal: controller.signal,
-      headers: { Accept: "application/json" },
+      headers: {
+        "User-Agent": USER_AGENT,
+        Accept: "application/json",
+      },
     });
     return res.ok ? res : null;
   } catch {
@@ -87,190 +84,172 @@ async function fetchWithTimeout(url: string): Promise<Response | null> {
   }
 }
 
+function parseRatingTier(lvl: GdbLevel): GdLevel["ratingTier"] {
+  const cp = lvl.cp ?? 0;
+  if (cp >= 5 || (lvl.epic && cp >= 4)) return "mythic";
+  if (cp === 4) return "legendary";
+  if (lvl.epic || cp === 3)    return "epic";
+  if (lvl.featured || cp === 2) return "featured";
+  if (lvl.stars > 0)            return "rated";
+  return "none";
+}
+
+function isDemon(difficulty: string): boolean {
+  return difficulty.toLowerCase().includes("demon");
+}
+
+function normalizeLevel(raw: GdbLevel): GdLevel | null {
+  const id = Number(raw.id);
+  if (!id || isNaN(id)) return null;
+
+  return {
+    gdId:        id,
+    name:        raw.name        ?? "Unknown",
+    author:      raw.author      ?? "Unknown",
+    difficulty:  raw.difficulty  ?? "Normal",
+    isDemon:     isDemon(raw.difficulty ?? ""),
+    stars:       raw.stars       ?? 0,
+    ratingTier:  parseRatingTier(raw),
+    downloads:   raw.downloads   ?? 0,
+    likes:       raw.likes       ?? 0,
+    length:      raw.length      ?? "Medium",
+    objects:     raw.objects     ?? 0,
+    songName:    raw.songName    ?? "",
+    songAuthor:  raw.songAuthor  ?? "",
+    description: raw.description ?? "",
+    gameVersion: raw.version ? String(raw.version) : "22",
+  };
+}
+
+// ── Search ─────────────────────────────────────────────────────────────────
+
 /**
- * Fetch one page of demons from Pointercrate.
- * limit max is 100 per their docs.
+ * GDBrowser search query params:
+ *   type: 0=mostDownloaded, 1=mostLiked, 2=trending, 3=recent,
+ *         4=byUser, 5=featured, 6=magic, 11=hallOfFame, 16=epic
+ *   diff: 1=easy, 2=normal, 3=hard, 4=harder, 5=insane, -2=demon
+ *   demonFilter: 1=easyDemon, 2=medDemon, 3=hardDemon, 4=insaneDemon, 5=extremeDemon
+ *   page: 0-indexed
+ *   count: results per page (default 20, max ~20)
  */
-async function fetchDemonPage(after: number, limit = 100): Promise<PointercrateDemon[]> {
-  const url = `https://pointercrate.com/api/v2/demons/?limit=${limit}&after=${after}`;
+async function searchLevels(params: {
+  type?: number;
+  diff?: number;
+  demonFilter?: number;
+  page?: number;
+}): Promise<GdLevel[]> {
+  const { type = 0, diff = -1, demonFilter, page = 0 } = params;
+
+  const qs = new URLSearchParams({
+    type:  String(type),
+    diff:  String(diff),
+    page:  String(page),
+    count: "20",
+  });
+  if (demonFilter !== undefined) qs.set("demonFilter", String(demonFilter));
+
+  const url = `${BASE}/search/-?${qs.toString()}`;
   const res = await fetchWithTimeout(url);
   if (!res) return [];
+
   try {
     const data = await res.json();
-    return Array.isArray(data) ? data : [];
+    if (!Array.isArray(data)) return [];
+    return data
+      .map((raw: GdbLevel) => normalizeLevel(raw))
+      .filter((l): l is GdLevel => l !== null);
   } catch {
     return [];
   }
 }
 
+// ── Pool builder ───────────────────────────────────────────────────────────
+
 /**
- * Fetch all demons from Pointercrate across all pages.
- * Stops when a page comes back empty.
+ * Fetches a broad spread of levels across all difficulties and rating tiers.
+ * Called only from the sync job — not on live user requests.
+ *
+ * We fetch multiple pages per difficulty/type combo to build up a large
+ * enough pool to make the roulette interesting.
  */
-async function fetchAllDemons(): Promise<GdLevel[]> {
-  const results: GdLevel[] = [];
-  let after = 0;
-  const limit = 100;
+export async function fetchLevelPool(): Promise<GdLevel[]> {
+  // Each entry is one search call
+  const jobs: Array<{ type: number; diff: number; demonFilter?: number; page?: number }> = [
+    // Most downloaded per difficulty (pages 0 and 1)
+    { type: 0, diff: 1 },          // Easy
+    { type: 0, diff: 1, page: 1 },
+    { type: 0, diff: 2 },          // Normal
+    { type: 0, diff: 2, page: 1 },
+    { type: 0, diff: 3 },          // Hard
+    { type: 0, diff: 3, page: 1 },
+    { type: 0, diff: 4 },          // Harder
+    { type: 0, diff: 4, page: 1 },
+    { type: 0, diff: 5 },          // Insane
+    { type: 0, diff: 5, page: 1 },
+    { type: 0, diff: -2, demonFilter: 1 }, // Easy Demon
+    { type: 0, diff: -2, demonFilter: 1, page: 1 },
+    { type: 0, diff: -2, demonFilter: 2 }, // Medium Demon
+    { type: 0, diff: -2, demonFilter: 2, page: 1 },
+    { type: 0, diff: -2, demonFilter: 3 }, // Hard Demon
+    { type: 0, diff: -2, demonFilter: 3, page: 1 },
+    { type: 0, diff: -2, demonFilter: 4 }, // Insane Demon
+    { type: 0, diff: -2, demonFilter: 4, page: 1 },
+    { type: 0, diff: -2, demonFilter: 5 }, // Extreme Demon
+    { type: 0, diff: -2, demonFilter: 5, page: 1 },
 
-  while (true) {
-    const page = await fetchDemonPage(after, limit);
-    if (page.length === 0) break;
+    // Most liked per difficulty
+    { type: 1, diff: 3 },
+    { type: 1, diff: 4 },
+    { type: 1, diff: 5 },
+    { type: 1, diff: -2 },
 
-    for (const d of page) {
-      // Pointercrate uses level_id as the actual GD level ID.
-      // Some entries have null level_id (legacy/unverified) — skip those.
-      if (!d.level_id) continue;
+    // Featured pool
+    { type: 5, diff: 1 },
+    { type: 5, diff: 2 },
+    { type: 5, diff: 3 },
+    { type: 5, diff: 4 },
+    { type: 5, diff: 5 },
+    { type: 5, diff: -2, demonFilter: 1 },
+    { type: 5, diff: -2, demonFilter: 2 },
+    { type: 5, diff: -2, demonFilter: 3 },
+    { type: 5, diff: -2, demonFilter: 4 },
+    { type: 5, diff: -2, demonFilter: 5 },
 
-      const difficulty = demonDifficultyFromPosition(d.position);
+    // Epic pool (type 16)
+    { type: 16, diff: -1 },
+    { type: 16, diff: -1, page: 1 },
+    { type: 16, diff: -2 },
 
-      // Rating tier: top 150 are effectively "legendary/mythic" calibre,
-      // everything else is "hard_demon" rated level territory.
-      let ratingTier: GdLevel["ratingTier"] = "rated";
-      if (d.position <= 10)  ratingTier = "mythic";
-      else if (d.position <= 50)  ratingTier = "legendary";
-      else if (d.position <= 150) ratingTier = "epic";
-      else if (d.position <= 300) ratingTier = "featured";
+    // Hall of Fame (type 11)
+    { type: 11, diff: -1 },
 
-      results.push({
-        gdId:        d.level_id,
-        name:        d.name,
-        author:      d.publisher.name,
-        difficulty,
-        isDemon:     true,
-        stars:       10, // all rated demons are 10 stars
-        ratingTier,
-        downloads:   0,  // Pointercrate doesn't expose this
-        likes:       0,
-        length:      "Long",
-        objects:     0,
-        songName:    "",
-        songAuthor:  "",
-        description: `#${d.position} on the Pointercrate Demonlist. Verified by ${d.verifier.name}.`,
-        gameVersion: "22",
-      });
-    }
+    // Magic (type 6) — well-designed levels
+    { type: 6, diff: 3 },
+    { type: 6, diff: 4 },
+    { type: 6, diff: 5 },
 
-    // If we got fewer than limit, we're on the last page
-    if (page.length < limit) break;
+    // Trending (type 2) — fresh levels
+    { type: 2, diff: -1 },
+    { type: 2, diff: -2 },
+  ];
 
-    // Paginate by the last position value seen
-    const lastPosition = page[page.length - 1]?.position ?? 0;
-    after = lastPosition;
+  const all: GdLevel[] = [];
 
-    // Politeness delay
-    await new Promise((r) => setTimeout(r, 300));
+  for (const job of jobs) {
+    const results = await searchLevels(job);
+    all.push(...results);
+    console.log(`[gd-api] type=${job.type} diff=${job.diff} demonFilter=${job.demonFilter ?? "-"} page=${job.page ?? 0} → ${results.length} levels`);
+    await sleep(DELAY_MS);
   }
 
-  return results;
-}
-
-// ---------------------------------------------------------------------------
-// Static seed — non-demon levels
-// Real GD levels, curated across Easy / Normal / Hard / Harder / Insane.
-// gdId values are the actual in-game level IDs.
-// ---------------------------------------------------------------------------
-
-const STATIC_LEVELS: Omit<GdLevel, "downloads" | "likes" | "objects" | "songAuthor" | "description" | "gameVersion">[] = [
-  // ── Easy ──────────────────────────────────────────────────────────────────
-  { gdId: 128,    name: "Stereo Madness",      author: "RobTop",        difficulty: "Easy",   isDemon: false, stars: 1,  ratingTier: "rated",    length: "Long",   songName: "Stereo Madness" },
-  { gdId: 129,    name: "Back On Track",       author: "RobTop",        difficulty: "Easy",   isDemon: false, stars: 2,  ratingTier: "rated",    length: "Long",   songName: "Back on Track" },
-  { gdId: 130,    name: "Polargeist",          author: "RobTop",        difficulty: "Normal", isDemon: false, stars: 3,  ratingTier: "rated",    length: "Long",   songName: "Polargeist" },
-  { gdId: 131,    name: "Dry Out",             author: "RobTop",        difficulty: "Normal", isDemon: false, stars: 4,  ratingTier: "rated",    length: "Long",   songName: "Dry Out" },
-  { gdId: 132,    name: "Base After Base",     author: "RobTop",        difficulty: "Normal", isDemon: false, stars: 5,  ratingTier: "rated",    length: "Long",   songName: "Base After Base" },
-  { gdId: 133,    name: "Can't Let Go",        author: "RobTop",        difficulty: "Hard",   isDemon: false, stars: 6,  ratingTier: "rated",    length: "Long",   songName: "Can't Let Go" },
-  { gdId: 134,    name: "Jumper",              author: "RobTop",        difficulty: "Hard",   isDemon: false, stars: 6,  ratingTier: "rated",    length: "Long",   songName: "Jumper" },
-  { gdId: 135,    name: "Time Machine",        author: "RobTop",        difficulty: "Hard",   isDemon: false, stars: 7,  ratingTier: "rated",    length: "Long",   songName: "Time Machine" },
-  { gdId: 136,    name: "Cycles",              author: "RobTop",        difficulty: "Hard",   isDemon: false, stars: 7,  ratingTier: "rated",    length: "Long",   songName: "Cycles" },
-  { gdId: 137,    name: "xStep",              author: "RobTop",        difficulty: "Harder", isDemon: false, stars: 8,  ratingTier: "rated",    length: "Long",   songName: "xStep" },
-  { gdId: 138,    name: "Clutterfunk",         author: "RobTop",        difficulty: "Harder", isDemon: false, stars: 8,  ratingTier: "rated",    length: "Long",   songName: "Clutterfunk" },
-  { gdId: 139,    name: "Theory of Everything",author: "RobTop",        difficulty: "Harder", isDemon: false, stars: 8,  ratingTier: "rated",    length: "Long",   songName: "Theory of Everything" },
-  { gdId: 140,    name: "Electroman Adventures",author:"RobTop",        difficulty: "Harder", isDemon: false, stars: 9,  ratingTier: "rated",    length: "Long",   songName: "Electroman Adventures" },
-  { gdId: 141,    name: "Clubstep",            author: "RobTop",        difficulty: "Insane", isDemon: false, stars: 9,  ratingTier: "rated",    length: "Long",   songName: "Clubstep" },
-  { gdId: 142,    name: "Electrodynamix",      author: "RobTop",        difficulty: "Insane", isDemon: false, stars: 9,  ratingTier: "rated",    length: "Long",   songName: "Electrodynamix" },
-  { gdId: 143,    name: "Hexagon Force",       author: "RobTop",        difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "rated",    length: "Long",   songName: "Hexagon Force" },
-  { gdId: 144,    name: "Blast Processing",    author: "RobTop",        difficulty: "Harder", isDemon: false, stars: 10, ratingTier: "rated",    length: "Long",   songName: "Blast Processing" },
-  { gdId: 145,    name: "Theory of Everything 2", author: "RobTop",     difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "rated",    length: "Long",   songName: "Theory of Everything 2" },
-  { gdId: 146,    name: "Geometrical Dominator", author: "RobTop",      difficulty: "Harder", isDemon: false, stars: 10, ratingTier: "rated",    length: "Long",   songName: "Geometrical Dominator" },
-  { gdId: 147,    name: "Deadlocked",          author: "RobTop",        difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "rated",    length: "Long",   songName: "Deadlocked" },
-  { gdId: 148,    name: "Fingerdash",          author: "RobTop",        difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "rated",    length: "Long",   songName: "Fingerdash" },
-
-  // ── Popular Featured/Epic non-demon levels ─────────────────────────────
-  { gdId: 10565740, name: "Supersonic",        author: "Riot",          difficulty: "Insane", isDemon: false, stars: 9,  ratingTier: "epic",     length: "Long",   songName: "Supersonic" },
-  { gdId: 27704543, name: "Future Funk",       author: "Lazerblitz",    difficulty: "Hard",   isDemon: false, stars: 6,  ratingTier: "featured", length: "Long",   songName: "Future Funk" },
-  { gdId: 44569652, name: "Aeternus",          author: "Serponge",      difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "epic",     length: "Long",   songName: "Aeternus" },
-  { gdId: 34520014, name: "The Nightmare",     author: "Jax",           difficulty: "Hard",   isDemon: false, stars: 6,  ratingTier: "featured", length: "Medium", songName: "The Nightmare" },
-  { gdId: 31410817, name: "Velocity",          author: "Zippy",         difficulty: "Insane", isDemon: false, stars: 9,  ratingTier: "epic",     length: "Long",   songName: "Velocity" },
-  { gdId: 39659052, name: "Chromatic Aberration", author: "Serponge",   difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "legendary",length: "Long",   songName: "Chromatic Aberration" },
-  { gdId: 37349432, name: "LIMBO",             author: "Triaxis",       difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "epic",     length: "Long",   songName: "LIMBO" },
-  { gdId: 26994624, name: "Sonic Wave Infinity",author:"Cyclic",        difficulty: "Insane", isDemon: false, stars: 9,  ratingTier: "featured", length: "Long",   songName: "Sonic Wave" },
-  { gdId: 42480038, name: "Crimson Planet",    author: "Serponge",      difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "legendary",length: "Long",   songName: "Crimson Planet" },
-  { gdId: 58392959, name: "Silent Circles",    author: "Geo",           difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "epic",     length: "Long",   songName: "Silent Circles" },
-  { gdId: 10738977, name: "Problematic",       author: "Neptune",       difficulty: "Harder", isDemon: false, stars: 8,  ratingTier: "featured", length: "Long",   songName: "Problematic" },
-  { gdId: 13519, name: "Nine Circles",         author: "Zobros",        difficulty: "Insane", isDemon: false, stars: 9,  ratingTier: "featured", length: "Long",   songName: "Nine Circles" },
-  { gdId: 16869476, name: "Jawbreaker",        author: "Dorami",        difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "epic",     length: "Long",   songName: "Jawbreaker" },
-  { gdId: 29922707, name: "EDENS",             author: "RealDominus",   difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "epic",     length: "Long",   songName: "EDENS" },
-  { gdId: 47801745, name: "Plasma Pulse Finale",author:"Krazyman50",    difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "epic",     length: "Long",   songName: "Plasma Pulse" },
-  { gdId: 35430971, name: "Digital Descent",   author: "Etzer",         difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "epic",     length: "Long",   songName: "Digital Descent" },
-  { gdId: 26878561, name: "Sakupen Hell",       author: "Noobas",       difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "featured", length: "Long",   songName: "Sakupen Hell" },
-  { gdId: 56585856, name: "Astral Divinity",   author: "Serponge",      difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "legendary",length: "Long",   songName: "Astral Divinity" },
-  { gdId: 62936060, name: "Glint",             author: "Alphalpha",     difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "legendary",length: "Long",   songName: "Glint" },
-  { gdId: 69217101, name: "Desolation",        author: "Serponge",      difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "mythic",   length: "Long",   songName: "Desolation" },
-  { gdId: 72178321, name: "Opus Magnum",       author: "Cinnamon",      difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "mythic",   length: "Long",   songName: "Opus Magnum" },
-  { gdId: 66666666, name: "Forged in Fire",    author: "SteelX",        difficulty: "Harder", isDemon: false, stars: 9,  ratingTier: "epic",     length: "Long",   songName: "Forged in Fire" },
-  { gdId: 67117769, name: "Vortex",            author: "Triaxis",       difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "epic",     length: "Long",   songName: "Vortex" },
-  { gdId: 73981315, name: "Luminance",         author: "Etzer",         difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "legendary",length: "Long",   songName: "Luminance" },
-  { gdId: 10668725, name: "Hexagon Force v2",  author: "RobTop",        difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "rated",    length: "Long",   songName: "Hexagon Force" },
-  { gdId: 11774561, name: "Speed Racer",       author: "Funnygame",     difficulty: "Hard",   isDemon: false, stars: 7,  ratingTier: "featured", length: "Medium", songName: "Speed Racer" },
-  { gdId: 10565740, name: "Supersonic",        author: "Riot",          difficulty: "Harder", isDemon: false, stars: 8,  ratingTier: "epic",     length: "Long",   songName: "Supersonic" },
-  { gdId: 21761387, name: "Crescendo",         author: "Manix648",      difficulty: "Harder", isDemon: false, stars: 8,  ratingTier: "epic",     length: "Long",   songName: "Crescendo" },
-  { gdId: 18970836, name: "Atomic Butcher",    author: "Motleyorc",     difficulty: "Harder", isDemon: false, stars: 8,  ratingTier: "featured", length: "Long",   songName: "Atomic Butcher" },
-  { gdId: 40038089, name: "Impulse",           author: "Serponge",      difficulty: "Hard",   isDemon: false, stars: 7,  ratingTier: "featured", length: "Medium", songName: "Impulse" },
-  { gdId: 25632894, name: "Phobos",            author: "GironDavid",    difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "epic",     length: "Long",   songName: "Phobos" },
-  { gdId: 23934257, name: "Yatagarasu",        author: "Ggb0y",         difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "epic",     length: "Long",   songName: "Yatagarasu" },
-  { gdId: 30029034, name: "Fluke",             author: "Serponge",      difficulty: "Hard",   isDemon: false, stars: 7,  ratingTier: "featured", length: "Short",  songName: "Fluke" },
-  { gdId: 25557536, name: "Killbot",           author: "Motleyorc",     difficulty: "Harder", isDemon: false, stars: 8,  ratingTier: "featured", length: "Long",   songName: "Killbot" },
-  { gdId: 68290385, name: "Solar Flare",       author: "Serponge",      difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "legendary",length: "Long",   songName: "Solar Flare" },
-  { gdId: 55882456, name: "Polaris",           author: "Etzer",         difficulty: "Harder", isDemon: false, stars: 9,  ratingTier: "epic",     length: "Long",   songName: "Polaris" },
-  { gdId: 43369048, name: "Neon Abyss",        author: "Cinnamon",      difficulty: "Hard",   isDemon: false, stars: 6,  ratingTier: "featured", length: "Medium", songName: "Neon Abyss" },
-  { gdId: 51678559, name: "Cursed",            author: "Serponge",      difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "epic",     length: "Long",   songName: "Cursed" },
-  { gdId: 60000001, name: "Shockwave",         author: "Triaxis",       difficulty: "Harder", isDemon: false, stars: 9,  ratingTier: "epic",     length: "Long",   songName: "Shockwave" },
-  { gdId: 32847576, name: "Cosmic Calamity",   author: "Serponge",      difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "legendary",length: "Long",   songName: "Cosmic Calamity" },
-  { gdId: 38219775, name: "Nhelv",             author: "Nitrox",        difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "legendary",length: "Long",   songName: "Nhelv" },
-  { gdId: 14107325, name: "Clubstep v2",       author: "TrueArtist",    difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "featured", length: "Long",   songName: "Clubstep" },
-  { gdId: 20253833, name: "Conical Depression",author: "IIINePtunEIII", difficulty: "Insane", isDemon: false, stars: 10, ratingTier: "epic",     length: "Long",   songName: "Conical Depression" },
-];
-
-function expandStaticLevel(l: typeof STATIC_LEVELS[number]): GdLevel {
-  return {
-    ...l,
-    downloads:   0,
-    likes:       0,
-    objects:     0,
-    songAuthor:  "",
-    description: "",
-    gameVersion: "22",
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Main export
-// ---------------------------------------------------------------------------
-
-export async function fetchLevelPool(): Promise<GdLevel[]> {
-  console.log("[gd-api] Fetching demon levels from Pointercrate…");
-  const demonLevels = await fetchAllDemons();
-  console.log(`[gd-api] Got ${demonLevels.length} demon levels from Pointercrate.`);
-
-  const staticLevels = STATIC_LEVELS.map(expandStaticLevel);
-  console.log(`[gd-api] Added ${staticLevels.length} static non-demon levels.`);
-
-  const all = [...demonLevels, ...staticLevels];
-
-  // Dedupe by gdId (static seed wins for any overlap)
+  // Deduplicate by gdId
   const seen = new Set<number>();
-  return all.filter((l) => {
+  const deduped = all.filter((l) => {
     if (seen.has(l.gdId)) return false;
     seen.add(l.gdId);
     return true;
   });
+
+  console.log(`[gd-api] Total unique levels: ${deduped.length}`);
+  return deduped;
 }
