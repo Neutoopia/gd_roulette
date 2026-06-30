@@ -376,7 +376,9 @@ async function gdPost(endpoint: string, body: Record<string, string>): Promise<s
     const params = new URLSearchParams({ ...body, secret: GD_SECRET });
     const res = await fetch(`${GD_BASE}/${endpoint}`, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { "Content-Type": "application/x-www-form-urlencoded",
+         "User-Agent": "", // bypasses Cloudflare fingerprinting
+       },
       body: params.toString(),
       signal: controller.signal,
     });
