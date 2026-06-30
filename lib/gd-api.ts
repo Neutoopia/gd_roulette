@@ -254,7 +254,6 @@
 //   return deduped;
 // }
 
-
 // ----------------------------------------------------------------------------------//
 // ----------------------------------------------------------------------------------//
 // ----------------------------------------------------------------------------------//
@@ -265,7 +264,7 @@
  * (/api/sync-levels), never on live user requests.
  */
 
-const GD_BASE   = "https://www.boomlings.com/database";
+const GD_BASE = "https://www.boomlings.com/database";
 const GD_SECRET = "Wmfd2893gb7";
 const FETCH_TIMEOUT = 10_000;
 
@@ -296,23 +295,38 @@ function parseGdResponse(raw: string): Record<string, string> {
   return obj;
 }
 
-function parseDifficulty(face: number, isDemon: boolean, demonType: number): string {
+function parseDifficulty(
+  face: number,
+  isDemon: boolean,
+  demonType: number,
+): string {
   if (isDemon) {
     switch (demonType) {
-      case 1: return "Easy Demon";
-      case 2: return "Medium Demon";
-      case 4: return "Insane Demon";
-      case 5: return "Extreme Demon";
-      default: return "Hard Demon";
+      case 1:
+        return "Easy Demon";
+      case 2:
+        return "Medium Demon";
+      case 4:
+        return "Insane Demon";
+      case 5:
+        return "Extreme Demon";
+      default:
+        return "Hard Demon";
     }
   }
   switch (face) {
-    case 10: return "Easy";
-    case 20: return "Normal";
-    case 30: return "Hard";
-    case 40: return "Harder";
-    case 50: return "Insane";
-    default: return "Auto";
+    case 10:
+      return "Easy";
+    case 20:
+      return "Normal";
+    case 30:
+      return "Hard";
+    case 40:
+      return "Harder";
+    case 50:
+      return "Insane";
+    default:
+      return "Auto";
   }
 }
 
@@ -320,7 +334,12 @@ function parseLength(n: number): string {
   return ["Tiny", "Short", "Medium", "Long", "XL", "Platformer"][n] ?? "Medium";
 }
 
-function parseRatingTier(stars: number, featured: boolean, epic: boolean, cp: number): GdLevel["ratingTier"] {
+function parseRatingTier(
+  stars: number,
+  featured: boolean,
+  epic: boolean,
+  cp: number,
+): GdLevel["ratingTier"] {
   if (cp >= 5) return "mythic";
   if (cp === 4) return "legendary";
   if (epic || cp === 3) return "epic";
@@ -332,35 +351,40 @@ function parseRatingTier(stars: number, featured: boolean, epic: boolean, cp: nu
 function parseLevel(raw: string): GdLevel | null {
   try {
     const d = parseGdResponse(raw);
-    const stars    = parseInt(d["18"] ?? "0");
-    const cp       = parseInt(d["55"] ?? "0");
-    const isDemon  = d["17"] === "1";
+    const stars = parseInt(d["18"] ?? "0");
+    const cp = parseInt(d["55"] ?? "0");
+    const isDemon = d["17"] === "1";
     const featured = parseInt(d["19"] ?? "0") > 0;
-    const epic     = d["42"] === "1";
+    const epic = d["42"] === "1";
     const diffFace = parseInt(d["9"] ?? "0");
-    const demonT   = parseInt(d["43"] ?? "0");
+    const demonT = parseInt(d["43"] ?? "0");
 
     let description = "";
     try {
       description = d["3"]
-        ? Buffer.from(d["3"].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf-8")
+        ? Buffer.from(
+            d["3"].replace(/-/g, "+").replace(/_/g, "/"),
+            "base64",
+          ).toString("utf-8")
         : "";
-    } catch { description = ""; }
+    } catch {
+      description = "";
+    }
 
     return {
-      gdId:        parseInt(d["1"] ?? "0"),
-      name:        d["2"] ?? "Unknown",
-      author:      d["6"] ?? "Unknown",
-      difficulty:  parseDifficulty(diffFace, isDemon, demonT),
+      gdId: parseInt(d["1"] ?? "0"),
+      name: d["2"] ?? "Unknown",
+      author: d["6"] ?? "Unknown",
+      difficulty: parseDifficulty(diffFace, isDemon, demonT),
       isDemon,
       stars,
-      ratingTier:  parseRatingTier(stars, featured, epic, cp),
-      downloads:   parseInt(d["10"] ?? "0"),
-      likes:       parseInt(d["14"] ?? "0"),
-      length:      parseLength(parseInt(d["15"] ?? "1")),
-      objects:     parseInt(d["45"] ?? "0"),
-      songName:    d["52"] ?? "",
-      songAuthor:  d["53"] ?? "",
+      ratingTier: parseRatingTier(stars, featured, epic, cp),
+      downloads: parseInt(d["10"] ?? "0"),
+      likes: parseInt(d["14"] ?? "0"),
+      length: parseLength(parseInt(d["15"] ?? "1")),
+      objects: parseInt(d["45"] ?? "0"),
+      songName: d["52"] ?? "",
+      songAuthor: d["53"] ?? "",
       description,
       gameVersion: d["13"] ?? "",
     };
@@ -369,16 +393,20 @@ function parseLevel(raw: string): GdLevel | null {
   }
 }
 
-async function gdPost(endpoint: string, body: Record<string, string>): Promise<string | null> {
+async function gdPost(
+  endpoint: string,
+  body: Record<string, string>,
+): Promise<string | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
   try {
     const params = new URLSearchParams({ ...body, secret: GD_SECRET });
     const res = await fetch(`${GD_BASE}/${endpoint}`, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded",
-         "User-Agent": "", // bypasses Cloudflare fingerprinting
-       },
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "", // bypasses Cloudflare fingerprinting
+      },
       body: params.toString(),
       signal: controller.signal,
     });
@@ -393,13 +421,21 @@ async function gdPost(endpoint: string, body: Record<string, string>): Promise<s
 }
 
 export async function searchGdLevels(opts: {
-  type?: number; diff?: number; demonFilter?: number; page?: number;
+  type?: number;
+  diff?: number;
+  demonFilter?: number;
+  page?: number;
 }): Promise<GdLevel[]> {
   const { type = 0, diff = -1, demonFilter, page = 0 } = opts;
 
   const body: Record<string, string> = {
-    str: "-", type: String(type), diff: String(diff),
-    page: String(page), total: "0", count: "20", gameVersion: "22",
+    str: "-",
+    type: String(type),
+    diff: String(diff),
+    page: String(page),
+    total: "0",
+    count: "20",
+    gameVersion: "22",
   };
   if (demonFilter) body.demonFilter = String(demonFilter);
 
@@ -415,29 +451,141 @@ export async function searchGdLevels(opts: {
     .filter((l): l is GdLevel => l !== null && l.gdId > 0);
 }
 
-export async function fetchLevelPool(): Promise<GdLevel[]> {
-  const jobs: Array<{ type: number; diff: number; demonFilter?: number }> = [
-    { type: 0, diff: 1 }, { type: 0, diff: 2 }, { type: 0, diff: 3 },
-    { type: 0, diff: 4 }, { type: 0, diff: 5 },
-    { type: 0, diff: -2, demonFilter: 1 },
-    { type: 0, diff: -2, demonFilter: 2 },
-    { type: 0, diff: -2, demonFilter: 3 },
-    { type: 0, diff: -2, demonFilter: 4 },
-    { type: 0, diff: -2, demonFilter: 5 },
-    { type: 5, diff: 3 }, { type: 5, diff: 4 }, { type: 5, diff: 5 }, { type: 5, diff: -2 },
-    { type: 16, diff: -1 }, { type: 16, diff: -2 },
-    { type: 11, diff: -1 },
-    { type: 2, diff: -1 }, { type: 2, diff: -2 },
-    { type: 3, diff: 1 }, { type: 3, diff: -2 },
-  ];
+// export async function fetchLevelPool(): Promise<GdLevel[]> {
+//   const jobs: Array<{ type: number; diff: number; demonFilter?: number }> = [
+//     { type: 0, diff: 1 },
+//     { type: 0, diff: 2 },
+//     { type: 0, diff: 3 },
+//     { type: 0, diff: 4 },
+//     { type: 0, diff: 5 },
+//     { type: 0, diff: -2, demonFilter: 1 },
+//     { type: 0, diff: -2, demonFilter: 2 },
+//     { type: 0, diff: -2, demonFilter: 3 },
+//     { type: 0, diff: -2, demonFilter: 4 },
+//     { type: 0, diff: -2, demonFilter: 5 },
+//     { type: 5, diff: 3 },
+//     { type: 5, diff: 4 },
+//     { type: 5, diff: 5 },
+//     { type: 5, diff: -2 },
+//     { type: 16, diff: -1 },
+//     { type: 16, diff: -2 },
+//     { type: 11, diff: -1 },
+//     { type: 2, diff: -1 },
+//     { type: 2, diff: -2 },
+//     { type: 3, diff: 1 },
+//     { type: 3, diff: -2 },
+//   ];
 
+//   const all: GdLevel[] = [];
+//   for (const job of jobs) {
+//     const results = await searchGdLevels(job);
+//     all.push(...results);
+//     await new Promise((r) => setTimeout(r, 400));
+//   }
+
+//   const seen = new Set<number>();
+//   return all.filter((l) => {
+//     if (seen.has(l.gdId)) return false;
+//     seen.add(l.gdId);
+//     return true;
+//   });
+// }
+
+export async function fetchLevelPool(): Promise<GdLevel[]> {
+  const jobs: Array<{
+    type: number;
+    diff: number;
+    demonFilter?: number;
+    page?: number;
+  }> = [
+    // Most downloaded — pages 0, 1, 2 per difficulty
+    { type: 0, diff: 1 },
+    { type: 0, diff: 1, page: 1 },
+    { type: 0, diff: 1, page: 2 },
+    { type: 0, diff: 2 },
+    { type: 0, diff: 2, page: 1 },
+    { type: 0, diff: 2, page: 2 },
+    { type: 0, diff: 3 },
+    { type: 0, diff: 3, page: 1 },
+    { type: 0, diff: 3, page: 2 },
+    { type: 0, diff: 4 },
+    { type: 0, diff: 4, page: 1 },
+    { type: 0, diff: 4, page: 2 },
+    { type: 0, diff: 5 },
+    { type: 0, diff: 5, page: 1 },
+    { type: 0, diff: 5, page: 2 },
+    { type: 0, diff: -2, demonFilter: 1 },
+    { type: 0, diff: -2, demonFilter: 1, page: 1 },
+    { type: 0, diff: -2, demonFilter: 2 },
+    { type: 0, diff: -2, demonFilter: 2, page: 1 },
+    { type: 0, diff: -2, demonFilter: 3 },
+    { type: 0, diff: -2, demonFilter: 3, page: 1 },
+    { type: 0, diff: -2, demonFilter: 4 },
+    { type: 0, diff: -2, demonFilter: 4, page: 1 },
+    { type: 0, diff: -2, demonFilter: 5 },
+    { type: 0, diff: -2, demonFilter: 5, page: 1 },
+
+    // Most liked — different results from most downloaded
+    { type: 1, diff: 1 },
+    { type: 1, diff: 2 },
+    { type: 1, diff: 3 },
+    { type: 1, diff: 4 },
+    { type: 1, diff: 5 },
+    { type: 1, diff: -2, demonFilter: 1 },
+    { type: 1, diff: -2, demonFilter: 2 },
+    { type: 1, diff: -2, demonFilter: 3 },
+    { type: 1, diff: -2, demonFilter: 4 },
+    { type: 1, diff: -2, demonFilter: 5 },
+
+    // Trending — fresh/rotating levels, different each sync
+    { type: 2, diff: 1 },
+    { type: 2, diff: 2 },
+    { type: 2, diff: 3 },
+    { type: 2, diff: 4 },
+    { type: 2, diff: 5 },
+    { type: 2, diff: -2 },
+
+    // Recent — newest levels, always new content each sync
+    { type: 3, diff: 1 },
+    { type: 3, diff: 1, page: 1 },
+    { type: 3, diff: 2 },
+    { type: 3, diff: 2, page: 1 },
+    { type: 3, diff: 3 },
+    { type: 3, diff: 3, page: 1 },
+    { type: 3, diff: 4 },
+    { type: 3, diff: 4, page: 1 },
+    { type: 3, diff: 5 },
+    { type: 3, diff: 5, page: 1 },
+    { type: 3, diff: -2 },
+    { type: 3, diff: -2, page: 1 },
+
+    // Featured
+    { type: 5, diff: 3 },
+    { type: 5, diff: 4 },
+    { type: 5, diff: 5 },
+    { type: 5, diff: -2 },
+
+    // Epic
+    { type: 16, diff: -1 },
+    { type: 16, diff: -1, page: 1 },
+    { type: 16, diff: -2 },
+
+    // Hall of Fame
+    { type: 11, diff: -1 },
+    { type: 11, diff: -1, page: 1 },
+
+    // Magic
+    { type: 6, diff: 3 },
+    { type: 6, diff: 4 },
+    { type: 6, diff: 5 },
+  ];
+  
   const all: GdLevel[] = [];
   for (const job of jobs) {
     const results = await searchGdLevels(job);
     all.push(...results);
     await new Promise((r) => setTimeout(r, 400));
   }
-
   const seen = new Set<number>();
   return all.filter((l) => {
     if (seen.has(l.gdId)) return false;
