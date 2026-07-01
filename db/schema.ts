@@ -43,10 +43,15 @@ export const levels = sqliteTable("levels", {
   songAuthor:   text("song_author"),
   description:  text("description"),
   gameVersion:  text("game_version"),
-
+  // NOTE: GD's level-search endpoint does not reliably expose the real
+  // upload date. firstSeenAt is a proxy — the moment our own sync job
+  // first discovered this level — set once on insert, never updated.
+  // Sorting by "release date" in the app sorts by this, not GD's actual
+  // upload timestamp.
+  firstSeenAt:  integer("first_seen_at", { mode: "timestamp" })
+                  .notNull().default(sql`(unixepoch())`),
   lastSyncedAt: integer("last_synced_at", { mode: "timestamp" })
-                  .notNull()
-                  .default(sql`(unixepoch())`),
+                  .notNull().default(sql`(unixepoch())`),
 });
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,11 @@ import { users } from "@/db/schema";
 import { eq } from "drizzle-orm";
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
-  session: { strategy: "jwt" },
+  session: {
+    strategy: "jwt",
+    maxAge:   30 * 24 * 60 * 60, // 30 days — stay logged in across browser restarts
+    updateAge: 24 * 60 * 60,     // refresh the session token once per day of activity
+  },
   pages:   { signIn: "/login" },
   providers: [
     Credentials({
